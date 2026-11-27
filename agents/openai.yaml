@@ -1,4 +1,4 @@
 interface:
   display_name: "ZBS POS 新人欢迎海报"
-  short_description: "从薪人薪事入职表单取材，按固定字号生成可编辑销售新人欢迎海报"
-  default_prompt: "使用 $zbs-welcome-poster，按最新的待入职员工信息审核表单制作这位销售新人的欢迎海报。"
+  short_description: "从薪人薪事入职表单取材，生成生活照版与证件照版可编辑销售新人欢迎海报"
+  default_prompt: "使用 $zbs-welcome-poster，按最新的待入职员工信息审核表单为这位销售新人制作生活照和证件照两版欢迎海报。"

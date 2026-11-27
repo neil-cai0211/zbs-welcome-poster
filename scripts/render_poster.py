@@ -1,4 +1,4 @@
-"""Render a single fixed-type ZBS sales welcome poster using local PSD masters."""
+"""Render fixed-type sales welcome posters using local PSD masters."""
 import argparse
 import copy
 import json
@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 from psd_tools import PSDImage
 from psd_tools.api.layers import PixelLayer
 from psd_tools.constants import Compression, Resource, Tag
@@ -146,34 +146,70 @@ def place_layer(doc, composite, image, label, x, y, index):
     return layer
 
 
-def render(args):
-    v = load_fields(args.fields)
-    doc = PSDImage.open(args.blank)
-    sample = PSDImage.open(args.sales)
-    if doc.size != (1700,1700) or sample.size != doc.size or len(sample) < 7:
-        raise ValueError("需要已确认的 1700 × 1700 原版 PSD")
-    if sample[3].kind != "type" or sample[3].text.upper().splitlines()[-2:] != ["SALES DPT.","TELESALES"]:
-        raise ValueError("销售样稿版式与已确认映射不符")
-    if any(layer.kind != "type" for layer in (sample[5], sample[6])):
-        raise ValueError("销售样稿缺少文字样式层")
-    portrait = Image.open(args.portrait).convert("RGBA")
-    alpha = portrait.getchannel("A")
-    if alpha.getextrema() != (0,255):
+def validate_box(box, size):
+    if not isinstance(box, list) or len(box) != 4 or not all(type(n) is int for n in box):
+        raise ValueError("每个框需要四个整数坐标 [左, 上, 右, 下]")
+    x, y, right, bottom = box
+    if not (0 <= x < right <= size[0] and 0 <= y < bottom <= size[1]):
+        raise ValueError("版式框超出模板画布")
+    return x, y, right, bottom
+
+
+def read_layout(config, size, fields):
+    rows = text_boxes(fields)
+    if config.get("canvas") != list(size):
+        raise ValueError("版式配置的画布尺寸与证件照 PSD 不一致")
+    bounds = validate_box(config.get("photo_box"), size)
+    mode = config.get("photo_mode")
+    if mode not in ("cutout", "frame"):
+        raise ValueError("photo_mode 需要选 cutout 或 frame")
+    text = config.get("text_boxes")
+    if text == "sales" and size == (1700, 1700):
+        return rows, bounds, mode
+    if not isinstance(text, dict) or set(text) != {r[0] for r in rows}:
+        raise ValueError("请提供模板全部文字框，或明确指定已核对的 sales 文字版式")
+    layout = []
+    for label, value, _, _, pt, _, _ in rows:
+        x, y, right, bottom = validate_box(text[label], size)
+        layout.append((label, value, x, y, pt, right-x, bottom-y))
+    return layout, bounds, mode
+
+
+def fit_photo(path, bounds, mode):
+    left, top, right, bottom = bounds
+    width, height = right-left, bottom-top
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+    if mode == "frame":
+        if image.getchannel("A").getextrema() != (255, 255):
+            raise ValueError("矩形照片框需要保留背景的完整证件人像")
+        return ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS), left, top
+    alpha = image.getchannel("A")
+    if alpha.getextrema() != (0, 255):
         raise ValueError("需要已检查的透明人像，主体内部应为实色")
-    bbox = alpha.getbbox()
-    portrait = portrait.crop(bbox)
-    composite = Image.open(args.blank).convert("RGBA")
+    image = image.crop(alpha.getbbox())
+    scale = min(width/image.width, height/image.height)
+    image = image.resize(tuple(max(1, round(s*scale)) for s in image.size), Image.Resampling.LANCZOS)
+    return image, left + round((width-image.width)/2), bottom-image.height
+
+
+def render_variant(fields, sample, template, portrait, config, font_dir, output, stem):
+    doc = PSDImage.open(template)
+    if doc._record.header.depth != 8 or doc.pil_mode != "RGB":
+        raise ValueError("请使用 RGB、8 位的空白 PSD 副本")
+    rows, bounds, mode = read_layout(config, doc.size, fields)
+    with Image.open(template) as source:
+        composite = source.convert("RGBA")
     expected = {}
-    for index, (label, value, x, y, size, w, h) in enumerate(text_boxes(v)):
+    for index, (label, value, x, y, size, w, h) in enumerate(rows):
         chinese = label.endswith(" CN")
-        lines, pt, leading, image, (ax,ay) = fit(value, chinese, size, w, h, args.font_dir)
+        lines, pt, leading, image, (ax,ay) = fit(value, chinese, size, w, h, font_dir)
         layer = place_layer(doc, composite, image, label, x, y, index)
         layer.tagged_blocks[Tag.TYPE_TOOL_OBJECT_SETTING] = type_data(
             sample[6 if chinese else 5], lines, pt, leading, (x,y,ax,ay), image, chinese, 100+index)
         expected[label] = "\r".join(lines)
-    scale = min(565/portrait.width, 796/portrait.height)
-    portrait = portrait.resize(tuple(max(1,round(z*scale)) for z in portrait.size), Image.Resampling.LANCZOS)
-    place_layer(doc, composite, portrait, "人物｜置顶", round(1388-portrait.width/2),1187-portrait.height,len(expected))
+    image, px, py = fit_photo(portrait, bounds, mode)
+    place_layer(doc, composite, image, "人物｜置顶", px, py, len(expected))
     doc._update_record()
     rgb = composite.convert("RGB")
     doc._record.image_data.set_data([b.tobytes() for b in rgb.split()], doc._record.header)
@@ -185,26 +221,45 @@ def render(args):
     extra = doc._record.layer_and_mask_information.tagged_blocks
     if extra and Tag.TEXT_ENGINE_DATA in extra:
         del extra[Tag.TEXT_ENGINE_DATA]
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=args.output.parent) as temp:
-        work = Path(temp)
-        psd, png = work/"欢迎海报.psd", work/"欢迎海报.png"
-        with psd.open("wb") as f:
-            doc._record.write(f)
-        rgb.save(png,dpi=(72,72))
-        saved = PSDImage.open(psd)
-        layers = {l.name:l for l in saved.descendants()}
-        if any(layers[n].kind != "type" or layers[n].text != s for n,s in expected.items()):
-            raise ValueError("文字层读回不一致")
-        if saved[-1].name != "人物｜置顶" or ImageChops.difference(Image.open(psd).convert("RGB"),Image.open(png).convert("RGB")).getbbox():
+    psd, png = output/(stem+".psd"), output/(stem+".png")
+    with psd.open("wb") as f:
+        doc._record.write(f)
+    rgb.save(png, dpi=(72, 72))
+    saved = PSDImage.open(psd)
+    layers = {layer.name: layer for layer in saved.descendants()}
+    if any(layers[n].kind != "type" or layers[n].text != s for n, s in expected.items()):
+        raise ValueError("文字层读回不一致")
+    with Image.open(psd) as preview, Image.open(png) as flat:
+        if saved[-1].name != "人物｜置顶" or ImageChops.difference(preview.convert("RGB"), flat.convert("RGB")).getbbox():
             raise ValueError("合成预览核对失败")
-        # Publish the verified pair as one new directory on the same filesystem.
-        delivery = work/"delivery"
+
+
+def render(args):
+    fields = load_fields(args.fields)
+    sample = PSDImage.open(args.sales)
+    if (sample.size != (1700, 1700) or len(sample) < 7 or sample[3].kind != "type"
+            or sample[3].text.upper().splitlines()[-2:] != ["SALES DPT.", "TELESALES"]
+            or any(sample[n].kind != "type" for n in (5, 6))):
+        raise ValueError("销售样稿及文字样式与已确认映射不符")
+    id_inputs = (args.id_template, args.id_portrait, args.id_layout)
+    if any(id_inputs) and not all(id_inputs):
+        raise ValueError("双版输出需同时提供证件照模板、证件人像和版式配置")
+    if all(id_inputs) and args.portrait.samefile(args.id_portrait):
+        raise ValueError("请分别提供生活照和证件人像")
+    if args.output.exists():
+        raise FileExistsError("输出目录已存在，请选择新的版本目录")
+    life = {"canvas": [1700, 1700], "photo_box": [1106, 391, 1671, 1187],
+            "photo_mode": "cutout", "text_boxes": "sales"}
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=args.output.parent) as tmp:
+        delivery = Path(tmp)/"delivery"
         delivery.mkdir()
-        psd.rename(delivery/psd.name)
-        png.rename(delivery/png.name)
-        if args.output.exists():
-            raise FileExistsError("输出目录已存在，请选择新的版本目录")
+        render_variant(fields, sample, args.blank, args.portrait, life, args.font_dir,
+                       delivery, "欢迎海报-生活照版" if all(id_inputs) else "欢迎海报")
+        if all(id_inputs):
+            config = json.loads(args.id_layout.read_text(encoding="utf-8-sig"))
+            render_variant(fields, sample, args.id_template, args.id_portrait, config,
+                           args.font_dir, delivery, "欢迎海报-证件照版")
         delivery.rename(args.output)
 
 
@@ -213,6 +268,9 @@ if __name__ == "__main__":
     parser.add_argument("--fields", required=True, type=Path)
     parser.add_argument("--portrait", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path, help="new directory for the verified pair")
+    parser.add_argument("--id-template", type=Path, help="证件照专用的空白 PSD")
+    parser.add_argument("--id-portrait", type=Path, help="同一位新人的证件人像")
+    parser.add_argument("--id-layout", type=Path, help="按证件照底稿实测的框位 JSON")
     desktop = Path.home()/"Desktop"
     parser.add_argument("--blank", type=Path, default=desktop/"【交付】新人欢迎-空白.psd")
     parser.add_argument("--sales", type=Path, default=desktop/"【交付】新人欢迎-销售.psd")
