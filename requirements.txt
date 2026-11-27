@@ -1,0 +1,6 @@
+psd-tools==1.27.0
+Pillow>=11,<14
+numpy>=1.26,<3
+winrt-Windows.AI.MachineLearning
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections
