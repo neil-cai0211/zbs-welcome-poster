@@ -118,7 +118,7 @@ def frontal(im, model):
     return abs(offset)<=.35
 
 
-def extract(im, paths):
+def extract(im, paths, keep_background=False):
     boxes = people(im,paths["person"])
     if len(boxes)!=1:
         raise ValueError("未能确认单人照（检测人数 %d），请核对或更换照片" % len(boxes))
@@ -127,6 +127,8 @@ def extract(im, paths):
     crop = im.crop((max(0,int(x-pad)),max(0,int(y-pad)),min(im.width,int(r+pad)),min(im.height,int(b+pad))))
     if not frontal(crop,paths["face"]):
         raise ValueError("未能确认脸部正对镜头，请核对或更换照片")
+    if keep_background:
+        return im.copy()
     crop.thumbnail((2200,2200),Image.Resampling.LANCZOS)
     image = np.asarray(crop.resize((320,320),Image.Resampling.LANCZOS),dtype=np.float32)/255
     image = (image-np.array([.485,.456,.406],np.float32))/np.array([.229,.224,.225],np.float32)
@@ -152,6 +154,7 @@ if __name__=="__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--setup-models",action="store_true")
     p.add_argument("--models",type=Path,default=Path(os.getenv("LOCALAPPDATA",Path.home()))/"zbs-welcome-poster"/"models")
+    p.add_argument("--keep-background", action="store_true", help="通过单人正面核验后保留原背景和构图")
     p.add_argument("--photo",type=Path)
     p.add_argument("--out",type=Path)
     args = p.parse_args()
@@ -160,7 +163,7 @@ if __name__=="__main__":
         if not args.photo or not args.out:
             p.error("--photo 和 --out 需要同时提供")
         with Image.open(args.photo) as img:
-            portrait = extract(ImageOps.exif_transpose(img).convert("RGB"),paths)
+            portrait = extract(ImageOps.exif_transpose(img).convert("RGB"),paths,args.keep_background)
         with args.out.open("xb") as f:
             portrait.save(f,"PNG")
     elif not args.setup_models:
