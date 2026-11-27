@@ -193,7 +193,7 @@ def fit_photo(path, bounds, mode):
     return image, left + round((width-image.width)/2), bottom-image.height
 
 
-def render_variant(fields, sample, template, portrait, config, font_dir, output, stem):
+def render_variant(fields, styles, template, portrait, config, font_dir, output, stem):
     doc = PSDImage.open(template)
     if doc._record.header.depth != 8 or doc.pil_mode != "RGB":
         raise ValueError("请使用 RGB、8 位的空白 PSD 副本")
@@ -206,7 +206,7 @@ def render_variant(fields, sample, template, portrait, config, font_dir, output,
         lines, pt, leading, image, (ax,ay) = fit(value, chinese, size, w, h, font_dir)
         layer = place_layer(doc, composite, image, label, x, y, index)
         layer.tagged_blocks[Tag.TYPE_TOOL_OBJECT_SETTING] = type_data(
-            sample[6 if chinese else 5], lines, pt, leading, (x,y,ax,ay), image, chinese, 100+index)
+            styles[1 if chinese else 0], lines, pt, leading, (x,y,ax,ay), image, chinese, 100+index)
         expected[label] = "\r".join(lines)
     image, px, py = fit_photo(portrait, bounds, mode)
     place_layer(doc, composite, image, "人物｜置顶", px, py, len(expected))
@@ -234,13 +234,22 @@ def render_variant(fields, sample, template, portrait, config, font_dir, output,
             raise ValueError("合成预览核对失败")
 
 
+def sales_styles(sample):
+    if sample.size == (1700, 1700):
+        text = {layer.name: layer for layer in sample if layer.kind == "type"}
+        if (all(name in text for name in ("电影 EN", "电影 CN", "部门 EN", "岗位 EN"))
+                and text["部门 EN"].text == "SALES DPT." and text["岗位 EN"].text == "TELESALES"):
+            return text["电影 EN"], text["电影 CN"]
+        if (len(sample) >= 7 and sample[3].kind == "type"
+                and sample[3].text.upper().splitlines()[-2:] == ["SALES DPT.", "TELESALES"]
+                and all(sample[n].kind == "type" for n in (5, 6))):
+            return sample[5], sample[6]
+    raise ValueError("销售样稿及文字样式与已确认映射不符")
+
+
 def render(args):
     fields = load_fields(args.fields)
-    sample = PSDImage.open(args.sales)
-    if (sample.size != (1700, 1700) or len(sample) < 7 or sample[3].kind != "type"
-            or sample[3].text.upper().splitlines()[-2:] != ["SALES DPT.", "TELESALES"]
-            or any(sample[n].kind != "type" for n in (5, 6))):
-        raise ValueError("销售样稿及文字样式与已确认映射不符")
+    styles = sales_styles(PSDImage.open(args.sales))
     id_inputs = (args.id_template, args.id_portrait, args.id_layout)
     if any(id_inputs) and not all(id_inputs):
         raise ValueError("双版输出需同时提供证件照模板、证件人像和版式配置")
@@ -254,11 +263,11 @@ def render(args):
     with TemporaryDirectory(dir=args.output.parent) as tmp:
         delivery = Path(tmp)/"delivery"
         delivery.mkdir()
-        render_variant(fields, sample, args.blank, args.portrait, life, args.font_dir,
+        render_variant(fields, styles, args.blank, args.portrait, life, args.font_dir,
                        delivery, "欢迎海报-生活照版" if all(id_inputs) else "欢迎海报")
         if all(id_inputs):
             config = json.loads(args.id_layout.read_text(encoding="utf-8-sig"))
-            render_variant(fields, sample, args.id_template, args.id_portrait, config,
+            render_variant(fields, styles, args.id_template, args.id_portrait, config,
                            args.font_dir, delivery, "欢迎海报-证件照版")
         delivery.rename(args.output)
 
@@ -271,8 +280,8 @@ if __name__ == "__main__":
     parser.add_argument("--id-template", type=Path, help="证件照专用的空白 PSD")
     parser.add_argument("--id-portrait", type=Path, help="同一位新人的证件人像")
     parser.add_argument("--id-layout", type=Path, help="按证件照底稿实测的框位 JSON")
-    desktop = Path.home()/"Desktop"
-    parser.add_argument("--blank", type=Path, default=desktop/"【交付】新人欢迎-空白.psd")
-    parser.add_argument("--sales", type=Path, default=desktop/"【交付】新人欢迎-销售.psd")
+    templates = Path(__file__).resolve().parents[1] / "assets" / "templates"
+    parser.add_argument("--blank", type=Path, default=templates/"【交付】新人欢迎-空白.psd")
+    parser.add_argument("--sales", type=Path, default=templates/"【交付】新人欢迎-销售.psd")
     parser.add_argument("--font-dir", type=Path, default=Path(os.environ.get("WINDIR", "C:/Windows"))/"Fonts")
     render(parser.parse_args())

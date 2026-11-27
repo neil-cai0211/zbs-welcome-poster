@@ -8,3 +8,7 @@ __pycache__/
 *.onnx
 *.json
 .env
+
+# Only the two distribution templates are tracked.
+!/assets/templates/【交付】新人欢迎-空白.psd
+!/assets/templates/【交付】新人欢迎-销售.psd
